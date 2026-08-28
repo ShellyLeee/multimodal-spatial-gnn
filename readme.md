@@ -12,12 +12,17 @@ Spatial transcriptomics measures gene expression while preserving tissue coordin
 
 ### Research question
 
-Can spatial protein abundance be predicted more accurately by jointly modeling:
+This capstone asks two connected questions:
+
+1. Can spatial protein abundance be predicted more accurately by jointly modeling RNA expression, tissue morphology, cell composition, and local spatial dependencies?
+2. How well does such a model generalize from an observed tissue region or slice to a spatially shifted region or an unseen slice?
+
+The framework therefore combines:
 
 - RNA expression at each spatial spot;
 - local morphology from H&E image patches;
 - estimated cell-type abundance; and
-- spatial relationships and protein co-expression priors?
+- spatial relationships and protein co-expression priors.
 
 ### Model at a glance
 
@@ -30,7 +35,7 @@ The implemented pipeline consists of:
 5. **Spatial graph learning** — a two-layer GATv2 model propagates information between neighboring tissue spots.
 6. **Biologically informed optimization** — the training objective combines protein regression with spatial smoothness and protein co-expression regularization.
 
-Modality masking, input noise, feature dropout, and edge dropout are used to improve robustness across tissue slices.
+The task loss is Huber regression; Spearman correlation is used for validation and final evaluation. Modality masking, input noise, feature dropout, edge dropout, self-loops, normalization, and neighbor sampling are used to improve training stability and robustness across tissue slices.
 
 ## Repository Structure
 
@@ -89,7 +94,11 @@ python -c "import torch; print(torch.__version__); print(torch.version.cuda); pr
 
 ## Dataset Preparation
 
-Download the challenge dataset from [Google Drive](https://drive.google.com/drive/folders/1eq6sbTUaWCCOKcnkei6B65rozx-VX70K), then arrange the core files as follows:
+The main STP Challenge dataset contains adjacent glioma tissue sections measured with Visium HD spatial transcriptomics, CODEX spatial proteomics, and matched H&E imaging. Its feature space includes approximately 18,085 genes and 44 protein markers at 16 μm spatial resolution. The internal training/validation split is approximately 19:1, while the held-out challenge test data come from a different tissue slice and therefore measure cross-slice generalization.
+
+The thesis also evaluates the framework on an independent renal cell carcinoma (RCC) Xenium dataset containing approximately 405 genes, 27 protein markers, and H&E images. Left and right regions of the same section form a weaker spatial distribution-shift setting. This supplementary dataset is discussed in the thesis but is not included in the default repository workflow.
+
+Download the STP Challenge data from [Google Drive](https://drive.google.com/drive/folders/1eq6sbTUaWCCOKcnkei6B65rozx-VX70K), then arrange the core files as follows:
 
 ```text
 data/
@@ -190,20 +199,39 @@ The default output is `logs/run_01/predictions_run_01_final.csv`.
 
 The main experiment settings are defined in [`cfgs/gnn.yaml`](cfgs/gnn.yaml). This file controls input paths, preprocessing, graph construction, multimodal fusion, GATv2 architecture, regularization, optimization, and reproducibility settings.
 
-Useful ablations for extending the capstone include disabling H&E or cell-abundance features, changing the graph radius and neighborhood size, removing co-expression regularization, and comparing modality masking settings. Give each experiment a distinct `EXP_NAME` in the scripts so its artifacts remain isolated.
+The thesis compares a U-Net baseline, an RNA-only GAT, and the multimodal GAT, and also investigates alternative fusion strategies, graph operators, image encoders, and training schemes. The final design uses nonlinear MLP-based fusion and GATv2Conv: GATv2 was approximately 2% better than the compared GraphSAGE and GCN variants, while MLP fusion was more stable than direct concatenation or learned linear weighting. UNI-2h was slightly better than ResNet50, but ResNet50 was retained for accessibility and reproducibility. Neighbor sampling reduced memory use without degrading performance and appeared to provide useful stochastic regularization.
+
+Useful follow-up ablations include disabling H&E or cell-abundance features, changing graph radius and neighborhood size, removing biological regularizers, varying H&E patch resolution and receptive field, and comparing modality masking settings. Give each experiment a distinct `EXP_NAME` in the scripts so its artifacts remain isolated.
 
 ## Results and Interpretation
 
-The Codabench placements demonstrate that the proposed multimodal spatial approach was competitive on both development and held-out testing data. The gap between the two phases also highlights an important capstone finding: generalization across tissue slices remains harder than fitting an internal split. The included robustness mechanisms are intended to reduce reliance on any single modality and improve transfer to an unseen slice.
+Spearman correlation is the primary metric because it measures agreement in expression ranking while remaining insensitive to scale. The challenge score, **Top-10 SCC Mean**, averages the ten best per-protein Spearman correlations.
 
-Leaderboard rankings should be interpreted in the context of the STP Open Challenge dataset and evaluation protocol; they are not evidence of clinical validity.
+| Evaluation setting | Top-10 SCC Mean | Mean Spearman | Interpretation |
+|---|---:|---:|---|
+| STP validation, U-Net | 0.660 | 0.400 | Image-style convolutional baseline |
+| STP validation, GAT (RNA only) | 0.700 | 0.630 | Spatial graph structure provides a clear gain |
+| STP validation, GAT (RNA + H&E) | **0.747** | **0.6437** | Best in-distribution result; ranked 1st |
+| STP unseen-slice OOD test | **0.559** | 0.324 | Cross-slice distribution shift; ranked 2nd |
+| RCC spatial holdout | 0.740 | 0.560 | Stable transfer between regions of the same section |
+
+The multimodal model's mean training Spearman was 0.6884 on the best STP run, close enough to the validation value of 0.6437 to show no severe in-distribution overfitting. Adding H&E features improved the validation Top-10 SCC Mean from 0.700 to 0.747, supporting the thesis claim that morphology complements noisy or incomplete RNA measurements.
+
+The central result is nevertheless the generalization gap: performance fell from 0.747 on the in-distribution validation split to 0.559 on an unseen glioma slice. Per-protein behavior was also heterogeneous. Structure- or microenvironment-associated markers such as MAP2, IDH1, and CD14 remained comparatively predictable on the OOD test, whereas markers including Ki67 and SMA were more difficult. Across the reported analyses, individual protein correlations spanned approximately 0.42–0.83, reflecting differences in spatial organization and biological regulation.
+
+The RCC experiment provides an informative contrast. Its training, validation, and spatial-holdout mean Spearman values were approximately 0.53, 0.52, and 0.56, respectively. Because the regions came from the same section, morphology and spatial structure were more consistent than in the cross-slice STP test. Taken together, the experiments indicate that the model handles mild within-section shift well, while stain, tissue-structure, and experimental shifts between sections remain the main challenge.
+
+The biological priors also improve interpretability: cell-composition-aware smoothness encourages locally consistent predictions only where cellular microenvironments are similar, while the STRING-derived co-expression constraint helps preserve coordinated relationships between proteins. These findings are empirical within the thesis experiments and should not be interpreted as causal or clinical validation.
 
 ## Limitations and Future Work
 
-- Evaluation is based on the challenge data and may not generalize to other tissues, platforms, or staining protocols.
-- Cell-abundance estimates and pretrained image representations may introduce upstream bias.
-- GPU memory and H&E feature-extraction time are substantial.
-- Future work could evaluate pathology-specific foundation models, stronger cross-modal fusion, uncertainty estimation, and external biological validation.
+- **Cross-slice distribution shift remains the main limitation.** Stain variation, tissue architecture, and experimental noise substantially reduce performance on an unseen section. Future work should prioritize domain adaptation and pretrained domain-invariant representations for cross-sample and cross-tissue transfer.
+- **Morphology depends on image preprocessing choices.** Patch resolution, receptive-field size, and augmentation can materially affect H&E feature quality and should be evaluated systematically.
+- **External validation is still limited.** The RCC experiment measures a left-to-right split within one section, which is weaker than transfer across patients, tissues, laboratories, or measurement platforms. Broader external cohorts are needed.
+- **Upstream priors may propagate bias.** Cell2location estimates and pretrained image encoders are learned representations rather than direct ground truth; their uncertainty should be modeled explicitly.
+- **Performance varies considerably by protein.** Future work should investigate protein-specific uncertainty, regulatory complexity, and whether adaptive or pathway-aware objectives help difficult markers.
+- **Reproducibility and performance trade off.** Pathology foundation models such as UNI-2h showed a small gain but require controlled access and further tuning; systematic benchmarking against ResNet50 remains useful.
+- **Compute remains non-trivial.** Neighbor sampling controls graph memory usage, but whole-slide feature extraction is still expensive. More efficient encoders, caching, and scalable graph construction would improve accessibility.
 
 ## Author and Acknowledgements
 
