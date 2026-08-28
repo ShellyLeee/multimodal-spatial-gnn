@@ -1,197 +1,213 @@
-# Multimodal GNN for Spatial Transcriptomics-to-Proteomics Prediction
+# Multimodal Spatial GNN
 
-A comprehensive Graph Neural Network framework that integrates **Spatial Transcriptomics (RNA)**, **Histology Images (H&E)**, and **Cell Abundance Features** to predict spatial protein expression at cellular resolution.
+## A Capstone Project for Spatial Transcriptomics-to-Proteomics Prediction
 
-The solution ranked **1st 🏆** in the development phase and **2nd 🥈** in the testing phase of the [STP Open Challenge on Codabench](https://www.codabench.org/competitions/10696/) (participant: liyx2022). Results are available on the [competition leaderboard](https://www.codabench.org/competitions/10696/#/results-tab).
+This repository contains the 2026 capstone project of [Yixuan Li](https://www.linkedin.com/in/yixuanli1105/) at the **Southern University of Science and Technology (SUSTech)**. The project investigates whether spatial transcriptomics, histology, and cell-composition information can be integrated with a graph neural network to predict spatial protein expression.
+
+The resulting solution ranked **1st in the development phase** and **2nd in the testing phase** of the [STP Open Challenge on Codabench](https://www.codabench.org/competitions/10696/) under the participant name `liyx2022`. The corresponding results are available on the [competition leaderboard](https://www.codabench.org/competitions/10696/#/results-tab).
+
+## Project Overview
+
+Spatial transcriptomics measures gene expression while preserving tissue coordinates, but matched protein measurements are often more difficult or expensive to obtain. This capstone frames protein prediction as a spatial, multimodal learning problem: each measurement spot is represented as a graph node, nearby spots are connected by edges, and complementary biological and image-derived features are fused before graph message passing.
+
+### Research question
+
+Can spatial protein abundance be predicted more accurately by jointly modeling:
+
+- RNA expression at each spatial spot;
+- local morphology from H&E image patches;
+- estimated cell-type abundance; and
+- spatial relationships and protein co-expression priors?
+
+### Model at a glance
+
+The implemented pipeline consists of:
+
+1. **RNA preprocessing and reduction** — normalized transcriptomic features are compressed with a supervised MLP reducer.
+2. **Histology feature extraction** — multi-view H&E patches are encoded with an ImageNet-pretrained ResNet50 in the best submitted configuration.
+3. **Biological context integration** — cell2location abundance estimates are added as cell-composition features.
+4. **Multimodal fusion** — modality-specific representations are transformed and concatenated.
+5. **Spatial graph learning** — a two-layer GATv2 model propagates information between neighboring tissue spots.
+6. **Biologically informed optimization** — the training objective combines protein regression with spatial smoothness and protein co-expression regularization.
+
+Modality masking, input noise, feature dropout, and edge dropout are used to improve robustness across tissue slices.
+
+## Repository Structure
+
+```text
+multimodal-spatial-gnn/
+├── cfgs/                         # Experiment configuration
+├── common/                       # Losses, metrics, optimization, and utilities
+├── data/                         # Local datasets, priors, and extracted features
+├── datasets/                     # Graph datasets and preprocessing pipeline
+├── models/                       # GATv2, fusion, and feature-reduction modules
+├── scripts/                      # Data processing, training, and inference commands
+├── trainers/                     # Training and prediction logic
+├── train.py                      # Training entry point
+├── test_final.py                 # Final inference entry point
+└── environment.yml               # Reference Conda environment
+```
 
 ## Environment Setup
 
-**Requirements:** Ubuntu 22.04.5 LTS, Python 3.10, CUDA 12.1, RTX 4090 (24 GB VRAM)
+The reference experiments used Ubuntu 22.04.5 LTS, Python 3.10, CUDA 12.1, and an NVIDIA RTX 4090 with 24 GB VRAM.
 
-### 1. Clone Project
+### 1. Clone the repository
 
 ```bash
-# Clone repository
-git clone https://github.com/shellyleee/stpoc_gnn.git
-cd stpoc_gnn
+git clone https://github.com/ShellyLeee/multimodal-spatial-gnn.git
+cd multimodal-spatial-gnn
 ```
 
-### 2. Create Conda Environment
+### 2. Create the environment
+
+For an environment close to the original experiment, use the supplied specification:
 
 ```bash
-# Create environment
-conda create -n stp_gnn python=3.10 -y
+conda env create -f environment.yml
 conda activate stp_gnn
 ```
 
-### 3. Install Core Dependencies
+Alternatively, create a lightweight environment manually:
+
 ```bash
-# Spatial omics packages
+conda create -n stp_gnn python=3.10 -y
+conda activate stp_gnn
+
 pip install scanpy anndata h5py numpy pandas matplotlib seaborn
-
-# PyTorch (CUDA 12.1)
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 --no-cache-dir
-
-# ML utilities
-pip install scikit-learn tqdm jupyter ipykernel scipy pyyaml
-
-# Register kernel for Jupyter
-python -m ipykernel install --user --name stp_gnn --display-name "STP Challenge"
+pip install scikit-learn tqdm scipy pyyaml joblib timm huggingface_hub
+pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv torch_geometric \
+  -f https://data.pyg.org/whl/torch-2.5.1+cu121.html
 ```
 
-### 4. Install PyTorch Geometric
+Verify that PyTorch can access the GPU:
 
 ```bash
-# Verify PyTorch installation
 python -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available())"
-
-# Install PyG and extensions (choose version based the environment)
-pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv torch_geometric \
-    -f https://data.pyg.org/whl/torch-2.5.1+cu121.html
 ```
 
-### 5. Install Foundation Model Libraries (for H&E feature extraction)
+## Dataset Preparation
 
-``` bash
-# TIMM for foundation models (timm==1.0.7 for all FMs except ctranspath)
-pip install timm
+Download the challenge dataset from [Google Drive](https://drive.google.com/drive/folders/1eq6sbTUaWCCOKcnkei6B65rozx-VX70K), then arrange the core files as follows:
 
-# Optional: Hugging Face Hub for model downloads
-pip install huggingface_hub
-```
-
-## Data Preparation
-
-Download the challenge dataset from [Google Drive](https://drive.google.com/drive/folders/1eq6sbTUaWCCOKcnkei6B65rozx-VX70K).
-
-Place data files in the `data/` directory:
-
-```
+```text
 data/
-├── train_rna.h5ad                    # Training RNA expression (Slice A)
-├── train_pro.h5ad                    # Training protein expression (Slice A)
-├── valid_rna.h5ad                    # Validation RNA (Slice A internal split)
-├── test_rna.h5ad                     # Test RNA (Slice B - external validation)
-├── HE_image_full_resolution.tif      # H&E image (Slice A)
-├── test_HE_image_full_resolution.tif # H&E image (Slice B)
-└── bio_info/                         # Cell abundance and co-expression data
+├── train_rna.h5ad
+├── train_pro.h5ad
+├── valid_rna.h5ad
+├── test_rna.h5ad
+├── HE_image_full_resolution.tif
+├── test_HE_image_full_resolution.tif
+└── bio_info/
     ├── cell2location_predicted_cell_abundance_mean_train.csv
     ├── cell2location_predicted_cell_abundance_mean_valid.csv
     ├── cell2location_predicted_cell_abundance_mean_test.csv
     └── protein_coexpression_matrix.txt
 ```
-## 🚀 Reproduce Best Results (Quick Inference)
 
-We provide pre-trained model weights and preprocessed features to reproduce our best leaderboard results (testing phase) directly.
+The large challenge data, extracted image features, and checkpoints are not stored directly in this repository. See [`data/readme.md`](data/readme.md) for further details.
 
-**Note on Reproducibility**:
-All model hyperparameters and random seeds are fixed and stored in `logs/best_run/config.yaml`. This controls all major sources of randomness in data preprocessing, training, and inference.
+## Reproducing the Best Submission
 
-Due to floating-point arithmetic and GPU-level non-determinism, repeated inference runs may still exhibit minor numerical differences (<5%), which do not affect ranking-based evaluation metrics such as Spearman correlation.
+Pretrained weights and preprocessed artifacts provide the shortest path to reproducing the testing-phase submission. Model hyperparameters and random seeds are stored in `logs/best_run/config.yaml`.
 
-### Download Pre-trained Checkpoints
+### 1. Download the pretrained run
 
-Download the pre-trained model package `best_run` from [Google Drive](https://drive.google.com/drive/folders/1ww_mRSO0mRrSCqaWFgvZ9XO7xyPBlUeQ?usp=sharing):
-```
-best_run/
+Download the `best_run` package from [Google Drive](https://drive.google.com/drive/folders/1ww_mRSO0mRrSCqaWFgvZ9XO7xyPBlUeQ?usp=sharing) and place it under `logs/`:
+
+```text
+logs/best_run/
 ├── checkpoints/
-│   ├── gnn_best.pt              # Best GNN model weights
-│   └── mlp_reducer_best.pt      # Trained MLP reducer
-├── config.yaml                  # Best configuration used for training
-├── he_scaler.joblib             # H&E feature scaler
-└── cell_mean_scaler.joblib      # Cell abundance scaler
+│   ├── gnn_best.pt
+│   └── mlp_reducer_best.pt
+├── config.yaml
+├── he_scaler.joblib
+└── cell_mean_scaler.joblib
 ```
 
-After downloading, extract the archive and place the `best_run/` directory under `logs/`.
+### 2. Prepare test-set H&E features
 
-### Quick Inference with Pre-trained Model
+Recommended: download `test_he_features_robust_all.npy` from the same Google Drive folder and place it at:
 
-**Step 1: Prepare H&E features for test set**
+```text
+data/extracted_features/test_he_features_robust_all.npy
+```
 
-To ensure fast and reliable reproduction of our best leaderboard results, we provide two options:
-
-#### **Option 1: Download Pre-extracted Features (Recommended ⭐)**
-
-Download our pre-extracted H&E features in the test set: `data/extracted_features/test_he_features_robust_all.npy` from the [Google Drive](https://drive.google.com/drive/folders/1ww_mRSO0mRrSCqaWFgvZ9XO7xyPBlUeQ?usp=sharing) and placing it under `data/extracted_features/`. This allows you to skip H&E feature extraction entirely and directly run inference using the pre-trained model and fixed configuration in `logs/best_run/config.yaml`.
-
-**Skip to Step 2** after placing the features.
-
-#### **Option 2: Extract Features Yourself**
-
-If you prefer to extract H&E features from scratch:
-
-Download the ImageNet pretrained ResNet50 weights at [here](https://download.pytorch.org/models/resnet50-0676ba61.pth), and placed it under `data/pretrained_models/`.
-
-Then, run feature extractions by the command: 
+To regenerate the features instead, place the [ImageNet-pretrained ResNet50 weights](https://download.pytorch.org/models/resnet50-0676ba61.pth) in `data/pretrained_models/`, then run:
 
 ```bash
 export CUDA_VISIBLE_DEVICES=0
 python datasets/processing/extract_image_features.py \
-    --config logs/best_run/config.yaml \
-    --mode test
+  --config logs/best_run/config.yaml \
+  --mode test
 ```
 
-**⏱️ Expected Runtime**: This extraction step may take **40–60 minutes on GPU** (or longer on CPU), depending on the number of spots and hardware.
+Feature extraction typically takes 40–60 minutes on a GPU and longer on a CPU.
 
-**Step 2: Run inference on final test set**:
+### 3. Run inference
+
 ```bash
 export CUDA_VISIBLE_DEVICES=0
-
 python test_final.py \
-    --config logs/best_run/config.yaml \
-    --checkpoint logs/best_run/checkpoints/gnn_best.pt \
-    --output logs/best_run/predictions_best.csv \
-    --exp_name best_run
+  --config logs/best_run/config.yaml \
+  --checkpoint logs/best_run/checkpoints/gnn_best.pt \
+  --output logs/best_run/predictions_best.csv \
+  --exp_name best_run
 ```
 
-The generated prediction on the test data will be saved in `logs/best_run/predictions_best.csv`.
+Predictions are written to `logs/best_run/predictions_best.csv`. Inference takes approximately one minute on the reference GPU. Minor numerical variation may occur because of floating-point and GPU-level nondeterminism.
 
-**⏱️ Expected Runtime**: Inference takes around 1 minute.
+## Training from Scratch
 
+### 1. Extract H&E features
 
-## 🛠️ Training from Scratch
+Place `resnet50-0676ba61.pth` under `data/pretrained_models/`, confirm the paths in `cfgs/gnn.yaml`, and run:
 
-You can follow the steps below if you want to train the model from scratch or experiment with different configurations.
-
-### Step 1: Extract H&E Image Features
-
-First, place the ImageNet pretrained ResNet50 weights (`resnet50-0676ba61.pth`) under `data/pretrained_models/`.
-
-Then, edit `scripts/data_processing.sh` to comment out the test mode command, keeping only the train mode command.
-
-Run the following command to extract robust multi-view features from H&E images using foundation models:
-
-``` bash
+```bash
 bash scripts/data_processing.sh
 ```
 
-The H&E features will be saved to `data/extracted_features/`.
+Generated features are saved in `data/extracted_features/`.
 
-### Step 2: Train the Model
-
-Train the multimodal GNN with all features:
+### 2. Train the multimodal GNN
 
 ```bash
 bash scripts/train.sh
 ```
 
-Training outputs are saved to `logs/run_01/`:
+By default, experiment artifacts are written to `logs/run_01/`, including checkpoints, the resolved configuration, metrics, fitted scalers, and training-history plots.
 
-- `checkpoints/gnn_best.pt` - Best model checkpoint
-- `checkpoints/mlp_reducer_best.pt` - Trained MLP reducer
-- `config.yaml` - Configuration used for training
-- `metrics.json` - Training metrics and validation scores
-- `he_scaler.joblib` - H&E feature scaler
-- `cell_mean_scaler.joblib` - Cell abundance scaler
-- `training_history.png` - Loss curves
-- `spearman_history.png` - Correlation progression
-
-### Step 3: Generate Predictions
-
-Run inference on the final test set (Slice B):
+### 3. Generate final predictions
 
 ```bash
 bash scripts/test_final.sh
 ```
 
-The prediction will be saved to `logs/run_01/predictions_run_01_final.csv`.
+The default output is `logs/run_01/predictions_run_01_final.csv`.
+
+## Configuration and Experimentation
+
+The main experiment settings are defined in [`cfgs/gnn.yaml`](cfgs/gnn.yaml). This file controls input paths, preprocessing, graph construction, multimodal fusion, GATv2 architecture, regularization, optimization, and reproducibility settings.
+
+Useful ablations for extending the capstone include disabling H&E or cell-abundance features, changing the graph radius and neighborhood size, removing co-expression regularization, and comparing modality masking settings. Give each experiment a distinct `EXP_NAME` in the scripts so its artifacts remain isolated.
+
+## Results and Interpretation
+
+The Codabench placements demonstrate that the proposed multimodal spatial approach was competitive on both development and held-out testing data. The gap between the two phases also highlights an important capstone finding: generalization across tissue slices remains harder than fitting an internal split. The included robustness mechanisms are intended to reduce reliance on any single modality and improve transfer to an unseen slice.
+
+Leaderboard rankings should be interpreted in the context of the STP Open Challenge dataset and evaluation protocol; they are not evidence of clinical validity.
+
+## Limitations and Future Work
+
+- Evaluation is based on the challenge data and may not generalize to other tissues, platforms, or staining protocols.
+- Cell-abundance estimates and pretrained image representations may introduce upstream bias.
+- GPU memory and H&E feature-extraction time are substantial.
+- Future work could evaluate pathology-specific foundation models, stronger cross-modal fusion, uncertainty estimation, and external biological validation.
+
+## Author and Acknowledgements
+
+**Yixuan Li** — [LinkedIn](https://www.linkedin.com/in/yixuanli1105/)<br>
+Capstone Project, Southern University of Science and Technology (SUSTech), 2026
+
+This project was developed using data and evaluation infrastructure provided by the STP Open Challenge. The repository is intended for academic research and reproducibility.
